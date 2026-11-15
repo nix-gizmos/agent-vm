@@ -697,9 +697,17 @@
           # logout: they are shared by concurrent launches, and removing them
           # here would race one that has just made sure they exist and is
           # about to create its own dir in them.
+          #
+          # Renamed out of the way first, while the lock is still held: the
+          # dir and its lock leave their path in one step, so microvm-stop,
+          # which tests that path, never sees the lock gone and the dir still
+          # there (rm -rf would unlink the lock first). The dot keeps the
+          # remains out of the vms/*/ globs while they are removed.
           if [ -n "$INSTANCE_DIR" ]; then
-            chmod -R u+w "$INSTANCE_DIR" 2>/dev/null || true
-            rm -rf "$INSTANCE_DIR"
+            _gone="$INSTANCE_VMS/.gone-$ID"
+            mv -T -- "$INSTANCE_DIR" "$_gone" 2>/dev/null || _gone="$INSTANCE_DIR"
+            chmod -R u+w "$_gone" 2>/dev/null || true
+            rm -rf "$_gone"
           fi
         }
         trap cleanup EXIT
