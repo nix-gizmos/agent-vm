@@ -701,13 +701,24 @@
           # Renamed out of the way first, while the lock is still held: the
           # dir and its lock leave their path in one step, so microvm-stop,
           # which tests that path, never sees the lock gone and the dir still
-          # there (rm -rf would unlink the lock first). The dot keeps the
+          # there (rm -rf would unlink the lock first). Into a dir made for it
+          # here, so the target cannot already exist; the dot keeps the
           # remains out of the vms/*/ globs while they are removed.
           if [ -n "$INSTANCE_DIR" ]; then
-            _gone="$INSTANCE_VMS/.gone-$ID"
-            mv -T -- "$INSTANCE_DIR" "$_gone" 2>/dev/null || _gone="$INSTANCE_DIR"
-            chmod -R u+w "$_gone" 2>/dev/null || true
-            rm -rf "$_gone"
+            _gone=""
+            if _gone="$(mktemp -d "$INSTANCE_VMS/.gone-XXXXXX" 2>/dev/null)" \
+               && mv -T -- "$INSTANCE_DIR" "$_gone/$ID" 2>/dev/null; then
+              chmod -R u+w "$_gone" 2>/dev/null || true
+              rm -rf "$_gone"
+            else
+              # Should the rename fail all the same, the secrets still go, and
+              # the lock goes last: only the rmdir is left after it.
+              [ -z "$_gone" ] || rmdir "$_gone" 2>/dev/null || true
+              chmod -R u+w "$INSTANCE_DIR" 2>/dev/null || true
+              find "$INSTANCE_DIR" -mindepth 1 -maxdepth 1 ! -name lock -exec rm -rf -- {} + 2>/dev/null || true
+              rm -f "$INSTANCE_DIR/lock"
+              rmdir "$INSTANCE_DIR" 2>/dev/null || true
+            fi
           fi
         }
         trap cleanup EXIT

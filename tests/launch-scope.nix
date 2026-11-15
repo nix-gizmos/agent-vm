@@ -16,20 +16,26 @@
 #     running while the VM does, and systemd stops them when it exits;
 #   - `systemctl --user stop <scope>` stops the VM, and the launcher's cleanup
 #     still runs: its daemons and instance dir go;
-#   - a VM that exits normally leaves nothing.
+#   - microvm-stop returns only once the instance dir has gone, and the dir
+#     still goes when the cleanup cannot rename it out of the way first;
+#   - a VM that exits normally leaves nothing, in vms/ either.
 { pkgs, lib, runner }:
 
 let
   # The built launcher with QEMU, and only QEMU, swapped for $FAKE_QEMU — and
   # its scope probe made to fail when FAKE_NO_SCOPE=false, since systemd here
   # grants a scope even outside a session, and the unscoped path needs testing.
+  # Likewise the cleanup's rename of the instance dir, with FAKE_MV=false, for
+  # its fallback.
   launcher = pkgs.runCommand "microvm-run-fake-qemu" { } ''
     sed -E \
       -e 's|^( *)bash <\(|\1"$FAKE_QEMU" <(|' \
       -e 's|--scope --quiet --collect -- true 2>&1\)|--scope --quiet --collect -- "''${FAKE_NO_SCOPE:-true}" 2>\&1)|' \
+      -e 's|&& mv -T -- "\$INSTANCE_DIR"|\&\& "''${FAKE_MV:-mv}" -T -- "$INSTANCE_DIR"|' \
       ${runner}/bin/microvm-run > $out
     grep -q '"$FAKE_QEMU" <(' $out || { echo "the QEMU invocation moved; update the pattern" >&2; exit 1; }
     grep -qF -- '-- "''${FAKE_NO_SCOPE:-true}" 2>&1)' $out || { echo "the scope probe moved; update the pattern" >&2; exit 1; }
+    grep -qF -- '&& "''${FAKE_MV:-mv}" -T -- "$INSTANCE_DIR"' $out || { echo "the instance dir's rename moved; update the pattern" >&2; exit 1; }
     chmod +x $out
   '';
   # Answers QMP on one connection; the power button, or quit, "powers off".
@@ -80,14 +86,15 @@ pkgs.testers.runNixOSTest {
     def prop(unit, name):
         return machine.succeed(user(f"show -p {name} --value {unit}")).strip()
 
-    def launch(n, unscoped=False):
+    def launch(n, unscoped=False, no_rename=False):
         # A project name long enough that the launcher keeps only its first
         # 12 characters, so the instance dir's socket paths under the real
         # /run/user/1000 are as long as they get by default.
         project = f"{n}-a-long-project-name"
         machine.succeed(alice(
             f"mkdir -p ~/{project} && cd ~/{project} && "
-            + ("FAKE_NO_SCOPE=false " if unscoped else "") +
+            + ("FAKE_NO_SCOPE=false " if unscoped else "")
+            + ("FAKE_MV=false " if no_rename else "") +
             f"FAKE_QEMU=${fakeQemu} FAKE_QEMU_PID=/tmp/qemu{n}.pid FAKE_QEMU_EXIT=/tmp/exit{n} NO_PAUSE=1 "
             f"setsid -f ${launcher} </dev/null >/tmp/launch{n}.log 2>&1"))
         machine.wait_until_succeeds(f"test -s /tmp/qemu{n}.pid", timeout=timedelta(seconds=120))
@@ -192,12 +199,24 @@ pkgs.testers.runNixOSTest {
         for u in daemons(inst):
             wait_stopped(u)
 
+    with subtest("microvm-stop, with the instance dir's rename failing: the fallback still removes it"):
+        inst, d, qemu = launch(7, no_rename=True)
+        out = machine.succeed(alice(f"{STOP} {inst['id']}"))
+        assert f"{inst['id']} stopped" in out, out
+        # Only the rmdir is left after the lock goes, so the dir may still be
+        # there for that moment; what matters is that it, and its env, go.
+        machine.wait_until_fails(f"test -e {d}", timeout=timedelta(seconds=10))
+
     with subtest("a VM that exits normally leaves nothing"):
         inst, d, qemu = launch(3)
         machine.succeed("touch /tmp/exit3")
         machine.wait_until_fails(f"test -e {d}", timeout=timedelta(seconds=60))
         for u in daemons(inst) + [inst["units"]["scope"]]:
             wait_stopped(u)
+
+    with subtest("no launch leaves anything in vms/, renamed remains included"):
+        left = machine.succeed(f"ls -A {ROOT}/vms").split()
+        assert left == [], f"left in vms/: {left}"
         # The slice itself stays, empty, until logout; nothing is left in it.
         left = units_named(f"claude_microvm-{inst['id']}*")
         assert left <= {inst["slice"]}, left
