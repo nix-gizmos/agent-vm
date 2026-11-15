@@ -704,20 +704,31 @@
           # there (rm -rf would unlink the lock first). Into a dir made for it
           # here, so the target cannot already exist; the dot keeps the
           # remains out of the vms/*/ globs while they are removed.
+          #
+          # What cannot be removed is said, loudly: microvm-stop reports the
+          # launch stopped once the launcher has gone, whatever is left, and
+          # what is left may be guest/env, with the API keys.
+          _left() {
+            echo "microvm-run: could not remove $1 — it may still hold this launch's API keys (guest/env); remove it by hand" >&2
+          }
           if [ -n "$INSTANCE_DIR" ]; then
             _gone=""
             if _gone="$(mktemp -d "$INSTANCE_VMS/.gone-XXXXXX" 2>/dev/null)" \
                && mv -T -- "$INSTANCE_DIR" "$_gone/$ID" 2>/dev/null; then
               chmod -R u+w "$_gone" 2>/dev/null || true
-              rm -rf "$_gone"
+              rm -rf "$_gone" 2>/dev/null || _left "$_gone"
             else
               # Should the rename fail all the same, the secrets still go, and
-              # the lock goes last: only the rmdir is left after it.
+              # the lock goes last: only the rmdir is left after it. If they
+              # do not go, the lock stays too, with what is left.
               [ -z "$_gone" ] || rmdir "$_gone" 2>/dev/null || true
               chmod -R u+w "$INSTANCE_DIR" 2>/dev/null || true
-              find "$INSTANCE_DIR" -mindepth 1 -maxdepth 1 ! -name lock -exec rm -rf -- {} + 2>/dev/null || true
-              rm -f "$INSTANCE_DIR/lock"
-              rmdir "$INSTANCE_DIR" 2>/dev/null || true
+              if find "$INSTANCE_DIR" -mindepth 1 -maxdepth 1 ! -name lock -exec rm -rf -- {} + 2>/dev/null; then
+                rm -f "$INSTANCE_DIR/lock"
+                rmdir "$INSTANCE_DIR" 2>/dev/null || true
+              else
+                _left "$INSTANCE_DIR"
+              fi
             fi
           fi
         }

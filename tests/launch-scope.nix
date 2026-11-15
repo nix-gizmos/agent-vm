@@ -18,6 +18,8 @@
 #     still runs: its daemons and instance dir go;
 #   - microvm-stop returns only once the instance dir has gone, and the dir
 #     still goes when the cleanup cannot rename it out of the way first;
+#     what it cannot remove at all, it reports, and the fallback keeps the
+#     lock with it;
 #   - a VM that exits normally leaves nothing, in vms/ either.
 { pkgs, lib, runner }:
 
@@ -207,21 +209,49 @@ pkgs.testers.runNixOSTest {
         # there for that moment; what matters is that it, and its env, go.
         machine.wait_until_fails(f"test -e {d}", timeout=timedelta(seconds=10))
 
+    # Something in guest/ the user cannot remove: a directory of root's, with
+    # a file in it. (A file alone would not do: the instance dirs are sticky,
+    # but the user owns them, and the owner may remove anything in them.)
+    def stuck(d):
+        machine.succeed(f"mkdir {d}/guest/stuck && touch {d}/guest/stuck/f")
+
+    with subtest("what the cleanup cannot remove, it reports"):
+        inst, d, qemu = launch(8)
+        stuck(d)
+        out = machine.succeed(alice(f"{STOP} {inst['id']}"))
+        assert f"{inst['id']} stopped" in out, out
+        machine.succeed(f"test ! -e {d}")
+        machine.wait_until_succeeds(
+            f"grep -q 'could not remove {ROOT}/vms/.gone-.* — it may still hold' /tmp/launch8.log",
+            timeout=timedelta(seconds=10))
+        machine.succeed(f"rm -rf {ROOT}/vms/.gone-*")
+
+    with subtest("what the fallback cannot remove, it reports, and it keeps the lock"):
+        inst, d, qemu = launch(9, no_rename=True)
+        stuck(d)
+        out = machine.succeed(alice(f"{STOP} {inst['id']}"))
+        assert f"{inst['id']} stopped" in out, out
+        machine.wait_until_succeeds(
+            f"grep -qF 'could not remove {d} — it may still hold' /tmp/launch9.log",
+            timeout=timedelta(seconds=10))
+        machine.succeed(f"test -e {d}/lock")
+        machine.succeed(f"rm -rf {d}")
+
     with subtest("a VM that exits normally leaves nothing"):
         inst, d, qemu = launch(3)
         machine.succeed("touch /tmp/exit3")
         machine.wait_until_fails(f"test -e {d}", timeout=timedelta(seconds=60))
         for u in daemons(inst) + [inst["units"]["scope"]]:
             wait_stopped(u)
-
-    with subtest("no launch leaves anything in vms/, renamed remains included"):
-        left = machine.succeed(f"ls -A {ROOT}/vms").split()
-        assert left == [], f"left in vms/: {left}"
         # The slice itself stays, empty, until logout; nothing is left in it.
         left = units_named(f"claude_microvm-{inst['id']}*")
         assert left <= {inst["slice"]}, left
-        # The shared root and vms/ stay, empty, until logout.
-        machine.succeed(f"test -d {ROOT}/vms && test -z \"$(ls -A {ROOT}/vms)\"")
         machine.fail("grep -i error /tmp/launch3.log")
+
+    with subtest("no launch leaves anything in vms/, renamed remains included"):
+        # The dir leaves its path at the rename; its remains go just after.
+        machine.wait_until_succeeds(
+            f"test -d {ROOT}/vms && test -z \"$(ls -A {ROOT}/vms)\"",
+            timeout=timedelta(seconds=10))
   '';
 }
