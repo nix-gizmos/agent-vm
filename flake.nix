@@ -654,12 +654,13 @@
         cleanup() {
           # On a signal, bash runs this at once, while QEMU may still be
           # ending (a stopped slice signals it too): wait, briefly, until it
-          # lets go of the instance lock it inherited, as the VM_TIMEOUT
-          # watcher does, so the reset comes after its last output. After
-          # QEMU has returned, the lock is free at once.
-          if [ -n "''${_INSTANCE_LOCK_FD:-}" ]; then
-            exec {_INSTANCE_LOCK_FD}>&-
-            ${pkgs.util-linux}/bin/flock -w 10 "$INSTANCE_DIR/lock" true 2>/dev/null || true
+          # lets go of qemu.lock, which only it inherited, so the reset comes
+          # after its last output. After QEMU has returned, that lock is free
+          # at once. The instance lock stays held until the launcher exits:
+          # microvm-stop takes it being free to mean this cleanup is done.
+          if [ -n "''${_QEMU_LOCK_FD:-}" ]; then
+            exec {_QEMU_LOCK_FD}>&-
+            ${pkgs.util-linux}/bin/flock -w 10 "$INSTANCE_DIR/qemu.lock" true 2>/dev/null || true
           fi
           _term_reset
           ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
@@ -1768,9 +1769,17 @@ EOF
           _TIMEOUT_PID=$!
         fi
 
+        # Held by QEMU alone (taken after the watcher above has forked, and
+        # nothing else starts from here on), so the cleanup trap can tell when
+        # QEMU has gone without letting go of the instance lock early.
+        exec {_QEMU_LOCK_FD}>"$INSTANCE_DIR/qemu.lock"
+        ${pkgs.util-linux}/bin/flock -n "$_QEMU_LOCK_FD"
+
         # Run QEMU with corrected paths
         _VM_RC=0
         bash <(${pkgs.gnused}/bin/sed "''${_SED_ARGS[@]}" ${runner}/bin/microvm-run) || _VM_RC=$?
+        exec {_QEMU_LOCK_FD}>&-
+        _QEMU_LOCK_FD=""
         _term_reset
         if [ -n "$_TIMEOUT_PID" ]; then
           kill "$_TIMEOUT_PID" 2>/dev/null || true
