@@ -436,6 +436,13 @@ in
       # twice. Serialise the whole region.
       exec 9>"''${XDG_RUNTIME_DIR:-/tmp}/claude-vm-seed.lock" 2>/dev/null && flock 9
 
+      ${cfg.shellInit}
+
+      # The notes below need ~/.claude to exist, which the agent's shellInit
+      # above creates (modules/agents/claude.nix): placed before it, the first
+      # login on a fresh agent home skipped them, and only the next one seeded
+      # them. Flavors with no ~/.claude still get none.
+
       # ENFILE on a share is an obscure failure with a non-obvious recovery, and
       # the agent is the one who will hit it. Seed the recognition and the fix.
       if [ -d ~/.claude ] && ! grep -q '<!-- MICROVM-SHARE-ENFILE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
@@ -461,7 +468,30 @@ explicit path lists over discovery in anything that iterates repositories.
 SHAREEOF
       fi
 
-      ${cfg.shellInit}
+      # What the user copies off the console arrives as the screen showed it:
+      # the agent's TUI indents code blocks and breaks long lines itself, so a
+      # multi-line command comes out in pieces. The workspace is the channel
+      # that carries text exactly; seed the habit of using it.
+      if [ -d ~/.claude ] && ! grep -q '<!-- MICROVM-COPY-VIA-FILE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
+        cat >> ~/.claude/CLAUDE.md << 'COPYEOF'
+
+<!-- MICROVM-COPY-VIA-FILE -->
+# Text the user has to copy: put it in a file
+
+The user reads you through the VM's console and copies from the screen. Your
+interface indents code blocks and breaks long lines itself, with an indent and
+no `\`, so a copied multi-line command arrives broken, and a long URL or
+config snippet may too.
+
+- Inline, give only short one-line commands.
+- Anything longer that the user must run or paste verbatim — multi-line
+  commands, `\` continuations, heredocs, config snippets, long URLs — write to
+  a file in the workspace, say what it does, and name it by its path relative
+  to the workspace root (`bash ./tmp-replies.sh`). The host sees the
+  workspace under its own path, not `/work`.
+- Remove the file once the user has used it. Never put secrets in it.
+COPYEOF
+      fi
 
       exec 9>&-
 

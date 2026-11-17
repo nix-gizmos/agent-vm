@@ -37,11 +37,12 @@ in
   config = lib.mkIf cfg.enable {
     microvm.mem = lib.mkDefault 8192;
 
-    programs.bash.interactiveShellInit = ''
-      # Seed CRI usage info into Claude Code's user-level memory (only if
-      # ~/.claude exists). Locked against the concurrent first-boot logins that
-      # would otherwise seed it twice — see modules/base.nix.
-      exec 9>"''${XDG_RUNTIME_DIR:-/tmp}/claude-vm-seed.lock" 2>/dev/null && flock 9
+    # Seed CRI usage info into Claude Code's user-level memory (only if
+    # ~/.claude exists). Part of the agent's shellInit, after the flavor's own
+    # (mkAfter), so it runs inside base.nix's seed lock and after the Claude
+    # flavor has created ~/.claude. A lock region of its own, as it had, ran
+    # before that, and the first login on a fresh agent home skipped it.
+    claude-vm.agent.shellInit = lib.mkAfter ''
       if [ -d ~/.claude ]; then
         # Clean up old sudo reminder if present
         if grep -q '<!-- CRI-SUDO -->' ~/.claude/CLAUDE.md 2>/dev/null; then
@@ -65,8 +66,9 @@ configured with appropriate group permissions for the agent user.
 CRIEOF
         fi
       fi
-      exec 9>&-
+    '';
 
+    programs.bash.interactiveShellInit = ''
       export CONTAINER_HOST=unix:///run/podman/podman.sock
     '';
 

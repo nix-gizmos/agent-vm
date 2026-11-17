@@ -425,6 +425,7 @@ $XDG_RUNTIME_DIR/claude-microvm/          one root for every flavor
     instance.json                         what this launch is (see below)
     lock                                  held while the launch runs
     qmp.sock                              QEMU's QMP control socket
+    winsize.in  winsize.out               the terminal size, sent to the guest (launched on a terminal)
     work.sock  agent-home.sock  guest.sock    the three virtiofsd sockets
     egress.port  egress.json              EGRESS_POLICY=shadow|enforce
 ```
@@ -764,6 +765,20 @@ it back, and `exit` (twice — bash warns about the stopped job first) powers th
 VM off. Only the console's own login shell runs the agent; a `bash -i` or
 `bash -l` started inside the VM, by you or by the agent, is an ordinary shell
 that starts no second agent and powers nothing off when it ends.
+
+### Terminal size
+
+The VM's console follows the size of the terminal you launched it from: resize
+the window and the agent redraws for the new width. QEMU's console device tells
+the guest no size of its own, so the launcher sends each new one over a second,
+one-way channel (a virtio-serial port, `org.agentvm.winsize`), and a service in
+the guest applies it to the console. Nothing comes back from the guest on it.
+A launch whose stdin or stdout is not a terminal has no size to send and adds
+no port.
+
+Copying a long line off the screen can still break it into several: the agent
+draws its own output row by row, and a terminal can only join back lines it
+wrapped itself.
 
 ### Nix dev shell support
 
