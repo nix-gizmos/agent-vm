@@ -116,6 +116,16 @@ pkgs.testers.runNixOSTest {
             for m, n in counts(home).items():
                 assert n == 1, f"round {r}: {m} appears {n} times, expected 1"
 
+    # A fresh agent home has no ~/.claude until the agent's own shellInit makes
+    # it. A block guarded on the directory and placed before that init was
+    # skipped by the first login and seeded only by the next one.
+    with subtest("one login on a fresh agent home seeds every block"):
+        home = "/tmp/fresh"
+        machine.succeed(f"mkdir -p {home}")
+        seed(home, 1)
+        for m, n in counts(home).items():
+            assert n == 1, f"fresh home, first login: {m} appears {n} times, expected 1"
+
     # The guard's original job: a file that already carries the blocks is left
     # alone, however many times a shell starts.
     with subtest("re-running over an already-seeded file changes nothing"):

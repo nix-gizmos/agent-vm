@@ -436,6 +436,13 @@ in
       # twice. Serialise the whole region.
       exec 9>"''${XDG_RUNTIME_DIR:-/tmp}/claude-vm-seed.lock" 2>/dev/null && flock 9
 
+      ${cfg.shellInit}
+
+      # The notes below need ~/.claude to exist, which the agent's shellInit
+      # above creates (modules/agents/claude.nix): placed before it, the first
+      # login on a fresh agent home skipped them, and only the next one seeded
+      # them. Flavors with no ~/.claude still get none.
+
       # ENFILE on a share is an obscure failure with a non-obvious recovery, and
       # the agent is the one who will hit it. Seed the recognition and the fix.
       if [ -d ~/.claude ] && ! grep -q '<!-- MICROVM-SHARE-ENFILE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
@@ -485,8 +492,6 @@ config snippet may too.
 - Remove the file once the user has used it. Never put secrets in it.
 COPYEOF
       fi
-
-      ${cfg.shellInit}
 
       exec 9>&-
 
