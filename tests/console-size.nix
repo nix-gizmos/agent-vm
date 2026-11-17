@@ -22,9 +22,12 @@
 pkgs.testers.runNixOSTest {
   name = "console-size";
 
-  nodes.machine = { ... }: {
+  nodes.machine = { lib, ... }: {
     imports = [ ../modules/console.nix ];
     claude-vm.console = "ttyS1";
+    # Long enough that the test can see the reader down, send, and see it still
+    # down: the size must have waited for the next reader, not met this one.
+    systemd.services.console-size.serviceConfig.RestartSec = lib.mkForce "10s";
     virtualisation.qemu.options = [
       "-chardev" "null,id=agent-console" "-device" "isa-serial,chardev=agent-console,index=1"
       # Relative: QEMU runs in the machine's state dir, where the test
@@ -77,9 +80,21 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("systemctl is-active console-size.service").strip() == "active"
 
     with subtest("a reader that dies comes back, and sizes sent meanwhile still apply"):
+        def down():
+            state = machine.succeed(
+                "systemctl show -p SubState -p MainPID --value console-size.service").split()
+            return sorted(state) == ["0", "auto-restart"]
+
         pid = machine.succeed("systemctl show -p MainPID --value console-size.service").strip()
         machine.succeed("systemctl kill --signal=KILL console-size.service")
+        machine.wait_until_succeeds(
+            "[ \"$(systemctl show -p SubState --value console-size.service)\" = auto-restart ]",
+            timeout=30)
         send("44 144")
+        machine.sleep(1)
+        assert down(), "the reader was back before the size was sent"
+        size = machine.succeed("stty -F /dev/ttyS1 size").strip()
+        assert size == "33 111", f"something read the size while the reader was down: {size}"
         machine.wait_until_succeeds(
             f"p=$(systemctl show -p MainPID --value console-size.service); [ \"$p\" != 0 ] && [ \"$p\" != {pid} ]",
             timeout=30)
