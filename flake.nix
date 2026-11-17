@@ -573,6 +573,7 @@
         #       instance.json                    what this is, for tools that list VMs
         #       lock                             held for the launch's lifetime
         #       qmp.sock                         QEMU's control socket
+        #       winsize.in  winsize.out          the terminal's size, for the guest (with a terminal)
         #       work.sock  agent-home.sock  guest.sock   the three virtiofsd
         #       egress.port  egress.json         EGRESS_POLICY=shadow|enforce
         #
@@ -1799,6 +1800,67 @@ EOF
           _TIMEOUT_PID=$!
         fi
 
+        # --- The terminal's size, for the guest's console ---
+        # QEMU's virtconsole tells the guest no size (cols and rows are 0, and
+        # stay 0), so the console keeps the one its login asked the terminal
+        # for at boot: after a resize the agent still lays out for the old
+        # width, which mangles the screen and breaks lines copied off it. A
+        # watcher sends "rows cols" over a virtio-serial port of its own,
+        # org.agentvm.winsize (modules/console.nix applies it), once now and
+        # again on every SIGWINCH, which the terminal sends to this launch's
+        # process group. Host to guest only: the guest's side of the port
+        # goes to /dev/null, so nothing it writes there is read or can fill a
+        # pipe. Only with a terminal on stdin and stdout, which is what the
+        # console is; without one there is no size to send. Like the
+        # VM_TIMEOUT watcher, it closes its copies of the launch's locks and
+        # ends once they are free, so a launcher killed outright leaves it
+        # running no longer than the VM.
+        _WINSIZE_PID=""
+        # The port goes in beside the console; should microvm.nix ever emit it
+        # differently, the guest keeps its boot-time size, and says nothing
+        # worse than that.
+        if [ -t 0 ] && [ -t 1 ] && ! grep -qF -- "-device 'virtconsole,chardev=stdio'" ${runner}/bin/microvm-run; then
+          echo "warning: the QEMU command line has no console to put the size channel beside; the guest keeps the terminal size it booted with" >&2
+        elif [ -t 0 ] && [ -t 1 ]; then
+          _WINSIZE="$INSTANCE_DIR/winsize"
+          mkfifo -m 600 "$_WINSIZE.in"
+          ln -s /dev/null "$_WINSIZE.out"
+          _SED_ARGS+=(
+            -e "s|-device 'virtconsole,chardev=stdio'|& -chardev 'pipe,id=winsize,path=$_WINSIZE' -device 'virtserialport,chardev=winsize,name=org.agentvm.winsize'|"
+          )
+          exec {_TTY_FD}<&0
+          (
+            trap - EXIT
+            exec {_INSTANCE_LOCK_FD}>&-
+            if [ -n "''${_EPHEMERAL_LOCK_FD:-}" ]; then exec {_EPHEMERAL_LOCK_FD}<&-; fi
+            # Read-write, so the open never waits for QEMU to open the other
+            # end; what is written before it does waits in the pipe.
+            exec {_WINSIZE_FD}<>"$_WINSIZE.in"
+            _sent=""
+            _send_size() {
+              local size
+              size="$(${pkgs.coreutils}/bin/stty size <&"$_TTY_FD" 2>/dev/null)" || return 0
+              # A terminal that has no size yet says "0 0": nothing to send.
+              case "$size" in *[!0-9\ ]*|"0 "*|*" 0"|"") return 0 ;; esac
+              [ "$size" != "$_sent" ] || return 0
+              _sent="$size"
+              printf '%s\n' "$size" >&"$_WINSIZE_FD" 2>/dev/null || true
+            }
+            trap _send_size WINCH
+            _send_size
+            while :; do
+              [ -e "$INSTANCE_DIR/lock" ] || exit 0
+              if ${pkgs.util-linux}/bin/flock -n "$INSTANCE_DIR/lock" true 2>/dev/null; then exit 0; fi
+              # A wait, not a plain sleep, so a SIGWINCH is handled at once;
+              # the sleep keeps neither the pipe nor the terminal open.
+              sleep 1 {_WINSIZE_FD}>&- {_TTY_FD}<&- &
+              wait $! || true
+            done
+          ) </dev/null &
+          _WINSIZE_PID=$!
+          exec {_TTY_FD}<&-
+        fi
+
         # Held by QEMU alone (taken after the watcher above has forked, and
         # nothing else starts from here on), so the cleanup trap can tell when
         # QEMU has gone without letting go of the instance lock early.
@@ -1811,6 +1873,7 @@ EOF
         exec {_QEMU_LOCK_FD}>&-
         _QEMU_LOCK_FD=""
         _term_reset
+        if [ -n "$_WINSIZE_PID" ]; then kill "$_WINSIZE_PID" 2>/dev/null || true; fi
         if [ -n "$_TIMEOUT_PID" ]; then
           kill "$_TIMEOUT_PID" 2>/dev/null || true
           # 124, as timeout(1) exits, so a caller can tell a run cut short
@@ -2104,6 +2167,10 @@ EOF
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
         };
+        launcher-winsize = import ./tests/launcher-winsize.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
         extra-shares = import ./tests/extra-shares.nix {
           inherit pkgs lib;
           inherit (self.lib) mkRunner mkNixosConfig;
@@ -2114,8 +2181,9 @@ EOF
           package = self.packages.${system}.claude;
         };
       } // lib.optionalAttrs (system == "x86_64-linux") {
-        # Gives its VM a second ISA UART for the console, which only x86 has.
+        # Each gives its VM a second ISA UART for the console, which only x86 has.
         single-console = import ./tests/single-console.nix { inherit pkgs; };
+        console-size = import ./tests/console-size.nix { inherit pkgs; };
       } // {
         store-overlay-disk = import ./tests/store-overlay-disk.nix {
           inherit pkgs lib;

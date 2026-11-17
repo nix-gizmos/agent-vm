@@ -1,6 +1,24 @@
-{ lib, config, ... }:
+{ lib, config, pkgs, ... }:
 let
   console = config.claude-vm.console;
+
+  # The launcher's side of this is in flake.nix, "The terminal's size".
+  winsizePort = "org.agentvm.winsize";
+  applySize = pkgs.writeShellScript "console-size" ''
+    set -u
+    # One "rows cols" per line, from the launcher's terminal. Anything else is
+    # skipped: the sender is the launcher, but a line that is not two sizes a
+    # terminal could have is no size to set.
+    while IFS=' ' read -r rows cols rest; do
+      case "$rows" in ""|*[!0-9]*) continue ;; esac
+      case "$cols" in ""|*[!0-9]*) continue ;; esac
+      [ -z "$rest" ] && [ "''${#rows}" -le 4 ] && [ "''${#cols}" -le 4 ] || continue
+      [ "$rows" -gt 0 ] && [ "$cols" -gt 0 ] || continue
+      # The kernel signals the console's foreground process group (SIGWINCH)
+      # when the size changes, so the agent redraws for the new width.
+      ${pkgs.coreutils}/bin/stty -F /dev/${console} rows "$rows" cols "$cols" || true
+    done < /dev/virtio-ports/${winsizePort}
+  '';
 in
 {
   options.claude-vm.console = lib.mkOption {
@@ -14,8 +32,8 @@ in
       a second agent, unseen, and its exit would take the VM down under the
       first.
 
-      Only tests/single-console.nix sets it, because the test driver keeps
-      hvc0 for itself.
+      Only tests/single-console.nix and tests/console-size.nix set it, because
+      the test driver keeps hvc0 for itself.
     '';
   };
 
@@ -33,5 +51,34 @@ in
     services.getty.autologinUser = "agent";
     systemd.services."getty@tty1".enable = false;
     systemd.services."autovt@tty1".enable = false;
+
+    # The console's size follows the launcher's terminal. QEMU's virtconsole
+    # reports none, so without this the console keeps the size its login
+    # asked the terminal for at boot, whatever happens to the window after.
+    # The launcher sends each new size over a virtio-serial port of its own,
+    # and only when it runs on a terminal; the port appearing is what starts
+    # the service, so a launch without one runs nothing.
+    services.udev.extraRules = ''
+      SUBSYSTEM=="virtio-ports", ATTR{name}=="${winsizePort}", TAG+="systemd", ENV{SYSTEMD_WANTS}+="console-size.service"
+    '';
+    systemd.services.console-size = {
+      description = "The console's size, from the launcher's terminal";
+      serviceConfig = {
+        ExecStart = applySize;
+        # Root without root's reach: stty needs only to open the console,
+        # which is the agent's once it is logged in.
+        CapabilityBoundingSet = [ "CAP_DAC_OVERRIDE" ];
+        NoNewPrivileges = true;
+        PrivateNetwork = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        SystemCallArchitectures = "native";
+      };
+    };
   };
 }
