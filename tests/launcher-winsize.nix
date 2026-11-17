@@ -56,18 +56,24 @@ pkgs.runCommand "launcher-winsize" { nativeBuildInputs = [ pkgs.socat pkgs.sqlit
 
   stty -F "$pty" rows 40 cols 132
   waitfor 'grep -qx "40 132" $LOG/sizes' && ok "a resize is sent" || bad "after a resize: $(cat $LOG/sizes)"
-  # The watcher looks at the lock once a second; a resize must not wait for that.
-  t0=$(date +%s%3N)
-  stty -F "$pty" rows 41 cols 132
-  waitfor 'grep -qx "41 132" $LOG/sizes' || bad "the second resize never arrived"
-  ms=$(( $(date +%s%3N) - t0 ))
-  [ $ms -lt 700 ] && ok "...at once, not on the watcher's next round (''${ms}ms)" || bad "the resize took ''${ms}ms"
-  stty -F "$pty" rows 41 cols 132      # the same again
+  # The watcher looks at the lock once a second; a resize must not wait for
+  # that. A resize handled only on that round would still arrive in time half
+  # the time, so time five: each must arrive well within one round.
+  slow=""
+  for r in 41 42 43 44 45; do
+    t0=$(date +%s%3N)
+    stty -F "$pty" rows $r cols 132
+    waitfor "grep -qx '$r 132' $LOG/sizes" || bad "the resize to $r rows never arrived"
+    ms=$(( $(date +%s%3N) - t0 ))
+    [ $ms -lt 500 ] || slow="$slow $r:''${ms}ms"
+  done
+  [ -z "$slow" ] && ok "...at once, not on the watcher's next round" || bad "resizes that waited:$slow"
+  stty -F "$pty" rows 45 cols 132      # the same again
   stty -F "$pty" rows 0 cols 0         # no size at all
   sleep 2
   stty -F "$pty" rows 25 cols 80
   waitfor 'grep -qx "25 80" $LOG/sizes'
-  [ "$(cat $LOG/sizes | tr '\n' ,)" = "30 90,40 132,41 132,25 80," ] \
+  [ "$(cat $LOG/sizes | tr '\n' ,)" = "30 90,40 132,41 132,42 132,43 132,44 132,45 132,25 80," ] \
     && ok "the same size twice, or none, sends nothing" || bad "sent: $(cat $LOG/sizes | tr '\n' ,)"
 
   touch $TMPDIR/release

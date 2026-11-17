@@ -18,6 +18,10 @@ let
       # when the size changes, so the agent redraws for the new width.
       ${pkgs.coreutils}/bin/stty -F /dev/${console} rows "$rows" cols "$cols" || true
     done < /dev/virtio-ports/${winsizePort}
+    # QEMU holds its end open for the VM's life, so the port does not end;
+    # if it ever does, fail, so that systemd restarts the reader.
+    echo "console-size: the size channel closed" >&2
+    exit 1
   '';
 in
 {
@@ -65,6 +69,9 @@ in
       description = "The console's size, from the launcher's terminal";
       serviceConfig = {
         ExecStart = applySize;
+        # A reader that dies would leave every later resize unapplied.
+        Restart = "on-failure";
+        RestartSec = "1s";
         # Root without root's reach: stty needs only to open the console,
         # which is the agent's once it is logged in.
         CapabilityBoundingSet = [ "CAP_DAC_OVERRIDE" ];

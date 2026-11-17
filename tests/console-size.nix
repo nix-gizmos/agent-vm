@@ -12,6 +12,8 @@
 #     replaces it, as a resize does;
 #   - lines that are not a size (words, zeros, five digits, three fields) are
 #     skipped, and the line after them still applies.
+#   - a reader that dies is restarted, and a size sent while it was down
+#     still applies.
 #
 # As in tests/single-console.nix, the driver keeps hvc0 and ttyS0, so the
 # console is a UART of its own on ttyS1.
@@ -73,5 +75,14 @@ pkgs.testers.runNixOSTest {
         send("33 111")
         size_is(33, 111)
         assert machine.succeed("systemctl is-active console-size.service").strip() == "active"
+
+    with subtest("a reader that dies comes back, and sizes sent meanwhile still apply"):
+        pid = machine.succeed("systemctl show -p MainPID --value console-size.service").strip()
+        machine.succeed("systemctl kill --signal=KILL console-size.service")
+        send("44 144")
+        machine.wait_until_succeeds(
+            f"p=$(systemctl show -p MainPID --value console-size.service); [ \"$p\" != 0 ] && [ \"$p\" != {pid} ]",
+            timeout=30)
+        size_is(44, 144)
   '';
 }
